@@ -205,7 +205,7 @@ async function analyzeTraceCommand() {
 }
 
 /**
- * Run demo agent
+ * Run agent
  */
 async function runDemoCommand() {
   const terminal = vscode.window.createTerminal("ACP Demo");
