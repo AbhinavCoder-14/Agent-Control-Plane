@@ -20,13 +20,8 @@
         "lint": "eslint src/**/*.ts",
         "ext:build": "cd vscode-extension && npm install && npm run compile",
         "ext:open": "npm run ext:build && code --extensionDevelopmentPath=vscode-extension .",
-<<<<<<< HEAD
         "ext:dev": "npm run build && npm run ext:build && code --extensionDevelopmentPath=e:\\Code\\Agent-Control-Plane\\vscode-extension .",
         "ext:quick": "code --extensionDevelopmentPath=e:\\Code\\Agent-Control-Plane\\vscode-extension ."
-=======
-        "ext:dev": "npm run build && npm run ext:build && code --extensionDevelopmentPath=vscode-extension .",
-        "ext:quick": "code --extensionDevelopmentPath=vscode-extension ."
->>>>>>> fe2c87e (changes in extension.ts)
     },
     "keywords": [
         "agent",
