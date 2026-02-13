@@ -330,4 +330,22 @@ export class TraceRecorder {
     private deepClone<T>(obj: T): T {
         return JSON.parse(JSON.stringify(obj));
     }
+
+    /**
+     * Add the trace to the BullMQ queue for Qdrant processing
+     */
+    private async queueTraceForIndexing(filePath: string) {
+        try {
+            mainFunction
+            console.log(`[TraceRecorder] Trace ${this.trace.traceId} queued for indexing.`);
+        } catch (error) {
+            console.error(`[TraceRecorder] Failed to queue trace:`, error);
+        }
+    }
+
+
+
+
+
+
 }

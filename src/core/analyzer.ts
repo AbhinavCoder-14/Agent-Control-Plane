@@ -499,6 +499,15 @@ export class QuickTraceAnalyzer {
         this.thresholds = thresholds
     }
 
+
+
+
+
+
+
+
+
+
     /**
      * Run full analysis
      */
