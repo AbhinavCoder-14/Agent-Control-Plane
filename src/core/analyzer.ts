@@ -1,3 +1,7 @@
+
+
+
+
 /**
  * Agent Control Plane - Memory & Step Analyzer
  * 
@@ -500,9 +504,96 @@ export class QuickTraceAnalyzer {
     }
 
 
+    public RunDeepAnalysis(warning:AnalysisReport){
+        return {
+        }
+    }
+
+    private getTraceSummary(trace: Trace): string {
+    return `Agent ${trace.agentId} attempt to ${trace.goal}. Used tools: ${trace.metadata.toolsUsed.join(', ')}. Outcome: ${trace.status}`;
+  }
+    
+    public getThresholdsFromHistory():Promise<DynamicThresholds>{
+        try{
+            const results = await this.vectorStore.similaritySearch(this.getTraceSummary(this.trace),50, // k
+        {
+            must: [
+                { key: "metadata.agentId", match: { value: this.trace.agentId } },
+                { key: "metadata.status", match: { value: "completed" } }
+            ]
+        });
+
+        if (results.length < 10) return null;
+        const steps = results.map(doc => doc.metadata.stepCount);
+        const durations = results.map(doc => doc.metadata.duration);
+
+        return {
+        steps: {
+          warning: math.quantileSeq(steps, 0.75) as number,
+          critical: math.quantileSeq(steps, 0.95) as number
+        },
+        duration: {
+          warning: math.quantileSeq(durations, 0.75) as number,
+          critical: math.quantileSeq(durations, 0.95) as number
+        },
 
 
 
+
+
+
+
+    
+
+    }
+
+    public getThresholdsFromClassification(){
+
+    }
+
+    public getConservativeDefaults(){
+
+    }
+    
+
+    private async calculateDynamicThresholds(): Promise<DynamicThresholds> {
+        // Strategy A: RAG - Learn from similar successful traces
+        const ragThresholds = await this.getThresholdsFromHistory();
+        if (ragThresholds && ragThresholds.confidence > 0.7) {
+        return ragThresholds;
+        }
+
+        // Strategy B: Classification - Ask Gemini what kind of agent this is
+        const classThresholds = await this.getThresholdsFromClassification();
+        if (classThresholds) {
+        return classThresholds;
+        }
+
+        // Strategy C: Statistical - Look at this specific agent's raw history (if available)
+        // (Skipped implementation for brevity, logic similar to A)
+
+        // Strategy D: Fallback
+        return this.getConservativeDefaults();
+    }
+
+    public generateFinalReport(warning:AnalysisReport,deepAnalysisResult:AnalysisReport){
+        return {}
+    }
+
+}
+
+
+
+
+
+export class QuickTraceAnalyzer {
+    private trace: Trace;
+    private config: DynamicThresholds;
+
+    constructor(trace: Trace, {config: DynamicThresholds} = {}) {
+        this.trace = trace;
+        this.config = config;
+    }
 
 
 
@@ -848,3 +939,21 @@ export function analyzeTrace(tracePath: string): AnalysisReport {
     const analyzer = QuickTraceAnalyzer.fromFile(tracePath);
     return analyzer.Quickanalyze();
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
