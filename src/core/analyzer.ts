@@ -475,13 +475,15 @@ public async runDeepAnalysis(currentWarnings: AnalysisWarning[]): Promise<any> {
                 totalSteps: this.trace.steps.length,
                 totalDuration: this.getDuration(),
                 status: this.trace.status,
-                agentType: this.trace.agentType,
+                llmCalls: this.trace.metadata.totalLLMCalls,
+                toolCalls: this.trace.metadata.totalToolCalls,
+                memoryPeakSize: '0',
             },
             thresholds: {
                 used: this.thresholds!,
                 explanation: `Thresholds determined from ${this.thresholds?.source}`,
             },
-            warnings: warning,
+            warnings: warning.warnings as AnalysisWarning[],
             insights: deepAnalysisResult?.insights || [],
             rootCauses: deepAnalysisResult?.rootCauses || [],
             recommendations: deepAnalysisResult?.recommendations || [],
@@ -503,328 +505,11 @@ export class QuickTraceAnalyzer {
         this.thresholds = thresholds
     }
 
-
-    public RunDeepAnalysis(warning:AnalysisReport){
-        return {
-        }
-    }
-
-    // 1. RETRIEVE: Get similar traces from Qdrant
-    // We search for traces that are semantically similar to the current one
-    const similarDocs = await this.vectorStore.similaritySearch(
-        this.getTraceSummary(this.trace),
-        3 
-    );
-    
-    // 2. FORMAT: Prepare the context for the LLM
-    // We convert the retrieved documents into a string the LLM can read
-    const similarTracesContext = similarDocs.map((doc, i) => {
-        const meta = doc.metadata;
-        return `
-        --- SIMILAR TRACE #${i + 1} ---
-        ID: ${meta.traceId}
-        Status: ${meta.status}
-        Steps: ${meta.stepCount}
-        Tools: ${meta.toolsUsed}
-        Outcome: ${meta.outcomeSummary || 'Not available'}
-        `;
-    }).join("\n");
-
-    // 3. PROMPT: Construct the "Mega-Prompt"
-    const prompt = PromptTemplate.fromTemplate(`
-      You are an Expert AI Agent Debugger. You are analyzing a specific execution trace.
-      
-      ### 1. THE CURRENT TRACE (What happened now)
-      - Agent ID: {agentId}
-      - Goal: {goal}
-      - Status: {status}
-      - Total Steps: {stepCount}
-      - Tools Used: {toolsUsed}
-      - Execution Duration: {duration}ms
-      
-      ### 2. THE RED FLAGS (Rule-based warnings)
-      These issues were already detected by our quick-scan algorithms:
-      {warnings}
-      
-      ### 3. THE KNOWLEDGE BASE (Similar Past Traces)
-      Here is how similar agents have performed in the past:
-      {similar_traces_context}
-      
-      ### YOUR TASK
-      Analyze the "Current Trace" using the "Red Flags" and "Knowledge Base" as context.
-      1. Explain WHY the warnings occurred (Root Cause).
-      2. Compare this execution to the similar traces (e.g., "This took 10 steps, but similar successful traces only took 5").
-      3. Provide actionable fixes.
-      
-      ### OUTPUT FORMAT (Strict JSON)
-      Return ONLY valid JSON with this structure:
-      {{
-        "insights": ["insight 1", "insight 2"],
-        "rootCauses": [
-          {{ "issue": "Brief Name", "cause": "Detailed explanation", "severity": "high/medium/low" }}
-        ],
-        "recommendations": [
-          {{ "title": "Fix Name", "description": "How to fix it", "priority": "high/medium/low" }}
-        ],
-        "similarTracesComparison": "A brief paragraph comparing this trace to the historical ones."
-      }}
-    `);
-
-    // 4. EXECUTE: Call Gemini
-    const chain = prompt.pipe(this.llm).pipe(new StringOutputParser());
-
-    try {
-        const result = await chain.invoke({
-            agentId: this.trace.agentId,
-            goal: this.trace?.finalState?.goal || "Unknown",
-            status: this.trace.status,
-            stepCount: this.trace.steps.length.toString(),
-            toolsUsed: this.trace.metadata.toolsUsed.join(", "),
-            duration: this.getDuration().toString(),
-            warnings: JSON.stringify(currentWarnings, null, 2),
-            similar_traces_context: similarTracesContext || "No similar traces found."
-        });
-
-        // 5. PARSE: Clean and parse the JSON response
-        const cleanJson = result.replace(/```json|```/g, '').trim();
-        return JSON.parse(cleanJson);
-
-    } catch (error) {
-        console.error("Deep Analysis Failed:", error);
-        // Return a safe empty object so the app doesn't crash
-        return {
-            insights: ["Deep analysis failed due to LLM error."],
-            rootCauses: [],
-            recommendations: [],
-            similarTracesComparison: "Could not compare."
-        };
-    }
-  }
-
-
-    public getTraceSummary(trace: Trace): string {
-    return `Agent ${trace.agentId} attempt to ${trace?.finalState?.goal}. Used tools: ${trace.metadata.toolsUsed.join(', ')}. Outcome: ${trace.status}`;
-  }
-    
-    public async getThresholdsFromHistory():Promise<DynamicThresholds | null>{
-
-        try {
-            const results = await this.vectorStore.similaritySearch(this.getTraceSummary(this.trace),50, // k
-        {
-            must: [
-                { key: "metadata.agentId", match: { value: this.trace.agentId } },
-                { key: "metadata.status", match: { value: "completed" } }
-            ]
-        });
-        
-        if (results.length < 10) return null;
-        
-        const steps = results.map(doc => doc.metadata.stepCount);
-        const durations = results.map(doc => doc.metadata.duration);
-
-        return {
-            steps: {
-            warning: math.quantileSeq(steps, 0.75) as number,
-            critical: math.quantileSeq(steps, 0.95) as number
-            },
-            duration: {
-            warning: math.quantileSeq(durations, 0.75) as number,
-            critical: math.quantileSeq(durations, 0.95) as number
-            },
-            source: 'learned_from_history',
-            confidence: 0.9,
-            basedOnTraceCount: results.length,
-            memoryGrowth: { warning: 10, critical: 20 },
-            repeatedCalls: { warning: 3, critical: 6 },
-            errorRate: { warning: 0.1, critical: 0.2 },
-
-        }
-
-    }catch(err){
-        console.error("LangChain Vector Search Error:", err);
-        return null;
-
-    }
-
-
-} 
-    private getDuration(): number {
-    if (this.trace.startTime && this.trace.endTime) {
-    return new Date(this.trace.endTime).getTime() - new Date(this.trace.startTime).getTime();
-    }
-    return 0;
-    }
-
-/**
-   * Strategy B: Ask Gemini to classify the agent based on its behavior
-   */
-  private async getThresholdsFromClassification(): Promise<DynamicThresholds | null> {
-    
-    // 1. Prepare the Classification Prompt
-    const classificationPrompt = `
-      You are an expert at analyzing AI Agent behavior.
-      
-      ANALYZE THIS AGENT TRACE:
-      - Goal: ${this.trace?.finalState?.goal || 'Unknown'}
-      - Tools Used: ${this.trace.metadata.toolsUsed.join(', ')}
-      - First 5 Steps: ${this.trace.steps.slice(0, 5).map(s => s.stepType).join(' -> ')}
-      - Total Duration: ${this.getDuration()}ms
-      
-      CLASSIFY INTO ONE CATEGORY:
-      1. SimpleQA (Quick, 1-3 steps, <2s)
-      2. ToolOrchestrator (Medium, 5-15 steps, 5-10s)
-      3. ResearchAgent (Long, 20-100 steps, 30s+)
-      4. CodeGenerator (Medium, 10-50 steps, 10-60s)
-      5. CreativeWriter (Short-Medium, 5-20 steps, 10s+)
-      
-      Return JSON only: { "type": "CategoryName", "confidence": 0.0-1.0 }
-    `;
-
-    try {
-      // 2. Call the LLM (using the instance we created in static create())
-      const response = await this.llm.invoke(classificationPrompt);
-      
-      // 3. Parse the JSON response
-      // Cleaning up markdown code blocks if Gemini adds them
-      const cleanText = response.content.toString().replace(/```json|```/g, '').trim();
-      const classification = JSON.parse(cleanText);
-
-      // 4. Validate Confidence
-      if (classification.confidence < 0.6) {
-        console.log(`Classification confidence too low (${classification.confidence}). Skipping.`);
-        return null; 
-      }
-
-      // 5. Map the classification to concrete thresholds
-      return this.getCategorythresholds(classification.type, classification.confidence);
-
-    } catch (error) {
-      console.error("Agent Classification Failed:", error);
-      return null; // Fallback to next strategy
-    }
-  }
-
-  /**
-   * temp: Helper: Maps a string category to number thresholds
-   * need a custom ml model to do that
-   */
-    private getCategorythresholds(type: string, conf: number): DynamicThresholds {
-        const basethresholds: DynamicThresholds = {
-        source: 'agent_classification',
-        confidence: conf,
-        basedOnTraceCount: 0,
-        memoryGrowth: { warning: 5, critical: 10 },
-        repeatedCalls: { warning: 3, critical: 6 },
-        errorRate: { warning: 0.1, critical: 0.3 },
-        steps: { warning: 10, critical: 20 },
-        duration: { warning: 5000, critical: 10000 },
-        };
-
-        // Override based on specific type
-        switch (type.toLowerCase()) {
-        case 'researchagent':
-            basethresholds.steps = { warning: 50, critical: 100 };
-            basethresholds.duration = { warning: 60000, critical: 120000 };
-            basethresholds.memoryGrowth = { warning: 20, critical: 50 };
-            break;
-            
-        case 'simpleqa':
-            basethresholds.steps = { warning: 3, critical: 6 };
-            basethresholds.duration = { warning: 2000, critical: 5000 };
-            break;
-
-        case 'codegenerator':
-            basethresholds.steps = { warning: 20, critical: 40 };
-            basethresholds.duration = { warning: 15000, critical: 45000 };
-            break;
-        }
-        
-        return basethresholds;
-    }
-
-    private getConservativeDefaults(): DynamicThresholds {
-    return {
-      // Steps: Allow up to 50 steps before warning (most agents are <15)
-      steps: { 
-          warning: 50, 
-          critical: 100 
-      },
-
-      // Duration: Allow 60s before warning (very generous for simple agents)
-      duration: { 
-          warning: 60000,   // 1 minute
-          critical: 300000  // 5 minutes
-      },
-
-      // Memory: Allow significant context growth
-      memoryGrowth: { 
-          warning: 20, 
-          critical: 50 
-      },
-
-      // Loops: Allow many repeated calls before flagging
-      repeatedCalls: { 
-          warning: 10, 
-          critical: 20 
-      },
-
-      // Error Rate: Allow 30% failure rate
-      errorRate: { 
-          warning: 0.3, 
-          critical: 0.6 
-      },
-
-      // Meta data
-      source: 'conservative_default',
-      confidence: 0.3, // Low confidence because it's a guess
-      basedOnTraceCount: 0
-    };
-  }
-    
-
-    public async calculateDynamicThresholds(): Promise<DynamicThresholds> {
-        // Strategy A: RAG - Learn from similar successful traces
-        const ragThresholds = await this.getThresholdsFromHistory();
-        if (ragThresholds && ragThresholds.confidence > 0.7) {
-        return ragThresholds;
-        }
-
-        // Strategy B: Classification - Ask Gemini what kind of agent this is
-        const classThresholds = await this.getThresholdsFromClassification();
-        if (classThresholds) {
-        return classThresholds;
-        }
-
-        // Strategy C: Statistical - Look at this specific agent's raw history (if available)
-        // (Skipped implementation for brevity, logic similar to A)
-
-        // Strategy D: Fallback
-        return this.getConservativeDefaults();
-    }
-
-    public generateFinalReport(warning:AnalysisReport,deepAnalysisResult:AnalysisReport){
-        return {}
-    }
-
-}
-
-
-
-
-export class QuickTraceAnalyzer {
-    public trace: Trace;
-    public thresholds: DynamicThresholds;
-
-    constructor(trace: Trace, thresholds: DynamicThresholds) {
-        this.trace = trace;
-        this.thresholds = thresholds
-    }
-
     /**
      * Run full analysis
      */
     Quickanalyze(): QuickAnalysisReport {
-        const warnings: AnalysisWarning[] = [];
+        const warnings: QucikAnalysisWarning[] = [];
 
         // Check step count
         warnings.push(...this.QuickcheckStepCount());
@@ -861,8 +546,8 @@ export class QuickTraceAnalyzer {
     /**
      * Check if step count is high
      */
-    private QuickcheckStepCount(): AnalysisWarning[] {
-        const warnings: AnalysisWarning[] = [];
+    private QuickcheckStepCount(): QucikAnalysisWarning[] {
+        const warnings: QucikAnalysisWarning[] = [];
         const stepCount = this.trace.steps.length;
 
         if (stepCount >= this.thresholds.steps.critical) {
@@ -893,8 +578,8 @@ export class QuickTraceAnalyzer {
     /**
      * Check for memory growth without usage
      */
-    private QuickcheckMemoryGrowth(): AnalysisWarning[] {
-        const warnings: AnalysisWarning[] = [];
+    private QuickcheckMemoryGrowth(): QucikAnalysisWarning[] {
+        const warnings: QucikAnalysisWarning[] = [];
         const memorySizes: { step: number; size: number }[] = [];
 
         for (const step of this.trace.steps) {
@@ -929,8 +614,8 @@ export class QuickTraceAnalyzer {
     /**
      * Check for repeated tool calls (same tool, same parameters)
      */
-    private QuickcheckRepeatedToolCalls(): AnalysisWarning[] {
-        const warnings: AnalysisWarning[] = [];
+    private QuickcheckRepeatedToolCalls(): QucikAnalysisWarning[] {
+        const warnings: QucikAnalysisWarning[] = [];
         const toolCalls: Map<string, number[]> = new Map();
 
         for (const step of this.trace.steps) {
@@ -946,7 +631,7 @@ export class QuickTraceAnalyzer {
         }
 
         for (const [key, steps] of toolCalls) {
-            if (steps.length >= this.thresholds.repeatedToolThreshold) {
+            if (steps.length >= this.thresholds.repeatedCalls.warning) {
                 const [toolName] = key.split(':');
                 warnings.push({
                     type: 'repeated_tool_calls',
@@ -967,8 +652,8 @@ export class QuickTraceAnalyzer {
     /**
      * Check for memory that was written but never read
      */
-    private QuickcheckUnusedMemory(): AnalysisWarning[] {
-        const warnings: AnalysisWarning[] = [];
+    private QuickcheckUnusedMemory(): QucikAnalysisWarning[] {
+        const warnings: QucikAnalysisWarning[] = [];
 
         // Get final memory keys
         const finalState = this.trace.finalState || this.trace.steps[this.trace.steps.length - 1]?.stateSnapshot;
@@ -1015,12 +700,12 @@ export class QuickTraceAnalyzer {
     /**
      * Check for steps with long duration
      */
-    private QuickcheckLongDurations(): AnalysisWarning[] {
-        const warnings: AnalysisWarning[] = [];
+    private QuickcheckLongDurations(): QucikAnalysisWarning[] {
+        const warnings: QucikAnalysisWarning[] = [];
         const slowSteps: number[] = [];
 
         for (const step of this.trace.steps) {
-            if ((step.duration || 0) > this.thresholds.longDurationThreshold) {
+            if ((step.duration || 0) > this.thresholds.duration.warning) {
                 slowSteps.push(step.stepNumber);
             }
         }
@@ -1029,9 +714,9 @@ export class QuickTraceAnalyzer {
             warnings.push({
                 type: 'long_duration',
                 severity: 'info',
-                message: `${slowSteps.length} step(s) took longer than ${this.thresholds.longDurationThreshold}ms`,
+                message: `${slowSteps.length} step(s) took longer than ${this.thresholds.duration.warning}ms`,
                 details: {
-                    threshold: this.thresholds.longDurationThreshold,
+                    threshold: this.thresholds.duration.warning,
                     slowStepCount: slowSteps.length,
                 },
                 stepNumbers: slowSteps,
@@ -1044,8 +729,8 @@ export class QuickTraceAnalyzer {
     /**
      * Check error rate
      */
-    private QuickcheckErrorRate(): AnalysisWarning[] {
-        const warnings: AnalysisWarning[] = [];
+    private QuickcheckErrorRate(): QucikAnalysisWarning[] {
+        const warnings: QucikAnalysisWarning[] = [];
         const errorSteps = this.trace.steps.filter(s => s.stepType === 'error');
         const errorRate = errorSteps.length / this.trace.steps.length;
 
@@ -1081,7 +766,7 @@ export class QuickTraceAnalyzer {
     /**
      * Generate summary statistics
      */
-    private QuickgenerateSummary(): AnalysisReport['summary'] {
+    private QuickgenerateSummary(): QuickAnalysisReport['summary'] {
         const startTime = new Date(this.trace.startTime).getTime();
         const endTime = this.trace.endTime ? new Date(this.trace.endTime).getTime() : Date.now();
 
@@ -1099,7 +784,7 @@ export class QuickTraceAnalyzer {
             totalDuration: endTime - startTime,
             llmCalls: this.trace.metadata.totalLLMCalls,
             toolCalls: this.trace.metadata.totalToolCalls,
-            errors: this.trace.steps.filter(s => s.stepType === 'error').length,
+            status: this.trace.status,
             memoryPeakSize: peakMemorySize,
         };
     }
@@ -1107,7 +792,7 @@ export class QuickTraceAnalyzer {
     /**
      * Generate recommendations based on warnings
      */
-    private QuickgenerateRecommendations(warnings: AnalysisWarning[]): string[] {
+    private QuickgenerateRecommendations(warnings: QucikAnalysisWarning[]): string[] {
         const recommendations: string[] = [];
 
         for (const warning of warnings) {
@@ -1147,16 +832,26 @@ export class QuickTraceAnalyzer {
     /**
      * Load analyzer from trace file
      */
-    static fromFile(tracePath: string, thresholds: DynamicThresholds): QuickTraceAnalyzer {
+    static fromFile(tracePath: string, thresholds?: DynamicThresholds): QuickTraceAnalyzer {
         const trace = TraceRecorder.load(tracePath);
-        return new QuickTraceAnalyzer(trace, thresholds);
+        const defaultThresholds = thresholds || {
+            steps: { warning: 50, critical: 100 },
+            duration: { warning: 60000, critical: 300000 },
+            memoryGrowth: { warning: 20, critical: 50 },
+            repeatedCalls: { warning: 10, critical: 20 },
+            errorRate: { warning: 0.3, critical: 0.6 },
+            source: 'conservative_default',
+            confidence: 0.3,
+            basedOnTraceCount: 0
+        };
+        return new QuickTraceAnalyzer(trace, defaultThresholds);
     }
 }
 
 /**
  * Quick analysis function
  */
-export function analyzeTrace(tracePath: string): AnalysisReport {
+export function analyzeTrace(tracePath: string): QuickAnalysisReport {
     const analyzer = QuickTraceAnalyzer.fromFile(tracePath);
     return analyzer.Quickanalyze();
 }
